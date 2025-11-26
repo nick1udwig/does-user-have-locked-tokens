@@ -41,9 +41,15 @@ sol! {
     event TokensWithdrawn(address indexed user, uint256 amountWithdrawn, uint256 remainingAmount, uint256 endTime);
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct LockInfo {
+    pub balance: U256,
+    pub end_time: u64,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct AppState {
-    locked_balances: HashMap<String, U256>,
+    locked_accounts: HashMap<String, LockInfo>,
     last_indexed_block: u64,
 }
 
@@ -56,23 +62,40 @@ impl AppState {
         if *topic0 == TokensLocked::SIGNATURE_HASH {
             if let Ok(decoded) = TokensLocked::decode_log_data(log.data(), true) {
                 let address = format!("{:?}", decoded.account).to_lowercase();
-                self.locked_balances
-                    .insert(address.clone(), decoded.balance);
-                println!("TokensLocked: {} balance: {}", address, decoded.balance);
+                // endTime is a U256 representing Unix timestamp
+                let end_time: u64 = decoded.endTime.try_into().unwrap_or(u64::MAX);
+                self.locked_accounts.insert(
+                    address.clone(),
+                    LockInfo {
+                        balance: decoded.balance,
+                        end_time,
+                    },
+                );
+                println!(
+                    "TokensLocked: {} balance: {} end_time: {}",
+                    address, decoded.balance, end_time
+                );
             }
         } else if *topic0 == TokensWithdrawn::SIGNATURE_HASH {
             if let Ok(decoded) = TokensWithdrawn::decode_log_data(log.data(), true) {
                 let address = format!("{:?}", decoded.user).to_lowercase();
                 if decoded.remainingAmount.is_zero() {
-                    self.locked_balances.remove(&address);
+                    self.locked_accounts.remove(&address);
+                    println!("TokensWithdrawn: {} fully withdrawn", address);
                 } else {
-                    self.locked_balances
-                        .insert(address.clone(), decoded.remainingAmount);
+                    let end_time: u64 = decoded.endTime.try_into().unwrap_or(u64::MAX);
+                    self.locked_accounts.insert(
+                        address.clone(),
+                        LockInfo {
+                            balance: decoded.remainingAmount,
+                            end_time,
+                        },
+                    );
+                    println!(
+                        "TokensWithdrawn: {} remaining: {} end_time: {}",
+                        address, decoded.remainingAmount, end_time
+                    );
                 }
-                println!(
-                    "TokensWithdrawn: {} remaining: {}",
-                    address, decoded.remainingAmount
-                );
             }
         }
 
@@ -85,10 +108,23 @@ impl AppState {
 
     fn has_locked_tokens(&self, address: &str) -> bool {
         let normalized = address.to_lowercase();
-        self.locked_balances
-            .get(&normalized)
-            .map(|balance| !balance.is_zero())
-            .unwrap_or(false)
+        let Some(info) = self.locked_accounts.get(&normalized) else {
+            return false;
+        };
+
+        // Must have non-zero balance
+        if info.balance.is_zero() {
+            return false;
+        }
+
+        // Check if lock is still active (end_time in the future)
+        // If system time is before epoch (misconfigured clock), return false conservatively
+        let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        else {
+            return false;
+        };
+
+        info.end_time > duration.as_secs()
     }
 
     fn save(&self) {
@@ -114,9 +150,7 @@ fn make_filter(from_block: Option<u64>) -> Filter {
         .events(vec![TokensLocked::SIGNATURE, TokensWithdrawn::SIGNATURE]);
 
     if let Some(block) = from_block {
-        filter = filter
-            .from_block(block)
-            .to_block(BlockNumberOrTag::Latest);
+        filter = filter.from_block(block).to_block(BlockNumberOrTag::Latest);
     }
 
     filter
@@ -202,7 +236,7 @@ fn init(our: Address) {
 
     println!(
         "Indexed {} addresses with locked tokens, last block: {}",
-        state.locked_balances.len(),
+        state.locked_accounts.len(),
         state.last_indexed_block
     );
 
@@ -233,8 +267,7 @@ fn init(our: Address) {
 
             match eth_result {
                 Ok(EthSub { result, .. }) => {
-                    let Ok(sub_result) =
-                        serde_json::from_value::<SubscriptionResult>(result)
+                    let Ok(sub_result) = serde_json::from_value::<SubscriptionResult>(result)
                     else {
                         println!("Failed to parse subscription result");
                         continue;
@@ -245,7 +278,7 @@ fn init(our: Address) {
                         state.save();
                         println!(
                             "Processed new log, {} addresses with locked tokens",
-                            state.locked_balances.len()
+                            state.locked_accounts.len()
                         );
                     }
                 }
