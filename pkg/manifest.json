@@ -1,0 +1,22 @@
+[
+  {
+    "process_name": "query",
+    "process_wasm_path": "/query.wasm",
+    "on_exit": "Restart",
+    "request_networking": false,
+    "request_capabilities": [
+      "eth:distro:sys",
+      "homepage:homepage:sys",
+      "http-server:distro:sys",
+      "vfs:distro:sys"
+    ],
+    "grant_capabilities": [
+      "eth:distro:sys",
+      "homepage:homepage:sys",
+      "http-server:distro:sys",
+      "vfs:distro:sys",
+      "tester:tester:sys"
+    ],
+    "public": false
+  }
+]
